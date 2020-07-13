@@ -767,12 +767,6 @@ func TestValidatePodSpec(t *testing.T) {
 			},
 		},
 		{
-			name: "reject 2 containers",
-			spec: func(s *v1.PodSpec) {
-				s.Containers = append(s.Containers, v1.Container{})
-			},
-		},
-		{
 			name:    "reject reserved presubmit env",
 			jobType: prowapi.PresubmitJob,
 			spec: func(s *v1.PodSpec) {
