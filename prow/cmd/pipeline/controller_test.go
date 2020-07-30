@@ -47,14 +47,18 @@ const (
 	errorGetPipelineRun    = "error-get-pipeline"
 	errorDeletePipelineRun = "error-delete-pipeline"
 	errorCreatePipelineRun = "error-create-pipeline"
+	errorGetPipeline       = "error-get-pipeline"
+	errorGetTask           = "error-get-task"
 	errorUpdateProwJob     = "error-update-prowjob"
 	pipelineID             = "123"
 )
 
 type fakeReconciler struct {
-	jobs      map[string]prowjobv1.ProwJob
-	pipelines map[string]pipelinev1alpha1.PipelineRun
-	nows      metav1.Time
+	jobs         map[string]prowjobv1.ProwJob
+	pipelineRuns map[string]pipelinev1alpha1.PipelineRun
+	pipelines    map[string]pipelinev1alpha1.Pipeline
+	tasks        map[string]pipelinev1alpha1.Task
+	nows         metav1.Time
 }
 
 func (r *fakeReconciler) now() metav1.Time {
@@ -100,7 +104,7 @@ func (r *fakeReconciler) getPipelineRun(context, namespace, name string) (*pipel
 		return nil, errors.New("injected create pipeline error")
 	}
 	k := toKey(context, namespace, name)
-	p, present := r.pipelines[k]
+	p, present := r.pipelineRuns[k]
 	if !present {
 		return nil, apierrors.NewNotFound(pipelinev1alpha1.Resource("PipelineRun"), name)
 	}
@@ -113,10 +117,10 @@ func (r *fakeReconciler) deletePipelineRun(context, namespace, name string) erro
 		return errors.New("injected create pipeline error")
 	}
 	k := toKey(context, namespace, name)
-	if _, present := r.pipelines[k]; !present {
+	if _, present := r.pipelineRuns[k]; !present {
 		return apierrors.NewNotFound(pipelinev1alpha1.Resource("PipelineRun"), name)
 	}
-	delete(r.pipelines, k)
+	delete(r.pipelineRuns, k)
 	return nil
 }
 
@@ -129,11 +133,37 @@ func (r *fakeReconciler) createPipelineRun(context, namespace string, p *pipelin
 		return nil, errors.New("injected create pipeline error")
 	}
 	k := toKey(context, namespace, p.Name)
-	if _, alreadyExists := r.pipelines[k]; alreadyExists {
+	if _, alreadyExists := r.pipelineRuns[k]; alreadyExists {
 		return nil, apierrors.NewAlreadyExists(prowjobv1.Resource("ProwJob"), p.Name)
 	}
-	r.pipelines[k] = *p
+	r.pipelineRuns[k] = *p
 	return p, nil
+}
+
+func (r *fakeReconciler) getPipeline(context, namespace, name string) (*pipelinev1alpha1.Pipeline, error) {
+	logrus.Debugf("getPipeline: ctx=%s, ns=%s, name=%s", context, namespace, name)
+	if namespace == errorGetPipeline {
+		return nil, errors.New("injected create pipeline error")
+	}
+	k := toKey(context, namespace, name)
+	p, present := r.pipelines[k]
+	if !present {
+		return nil, apierrors.NewNotFound(pipelinev1alpha1.Resource("Pipeline"), name)
+	}
+	return &p, nil
+}
+
+func (r *fakeReconciler) getTask(context, namespace, name string) (*pipelinev1alpha1.Task, error) {
+	logrus.Debugf("getPipelineRun: ctx=%s, ns=%s, name=%s", context, namespace, name)
+	if namespace == errorGetTask {
+		return nil, errors.New("injected create pipeline error")
+	}
+	k := toKey(context, namespace, name)
+	t, present := r.tasks[k]
+	if !present {
+		return nil, apierrors.NewNotFound(pipelinev1alpha1.Resource("Task"), name)
+	}
+	return &t, nil
 }
 
 func (r *fakeReconciler) pipelineID(pj prowjobv1.ProwJob) (string, string, error) {
@@ -710,9 +740,9 @@ func TestReconcile(t *testing.T) {
 				tc.context = kube.DefaultClusterAlias
 			}
 			r := &fakeReconciler{
-				jobs:      map[string]prowjobv1.ProwJob{},
-				pipelines: map[string]pipelinev1alpha1.PipelineRun{},
-				nows:      now,
+				jobs:         map[string]prowjobv1.ProwJob{},
+				pipelineRuns: map[string]pipelinev1alpha1.PipelineRun{},
+				nows:         now,
 			}
 
 			jk := toKey(fakePJCtx, fakePJNS, name)
@@ -725,16 +755,16 @@ func TestReconcile(t *testing.T) {
 			if p := tc.observedPipelineRun; p != nil {
 				p.Name = name
 				p.Labels[kube.ProwJobIDLabel] = name
-				r.pipelines[pk] = *p
+				r.pipelineRuns[pk] = *p
 			}
 
 			expectedJobs := map[string]prowjobv1.ProwJob{}
 			if j := tc.expectedJob; j != nil {
-				expectedJobs[jk] = j(r.jobs[jk], r.pipelines[pk])
+				expectedJobs[jk] = j(r.jobs[jk], r.pipelineRuns[pk])
 			}
 			expectedPipelineRuns := map[string]pipelinev1alpha1.PipelineRun{}
 			if p := tc.expectedPipelineRun; p != nil {
-				expectedPipelineRuns[pk] = p(r.jobs[jk], r.pipelines[pk])
+				expectedPipelineRuns[pk] = p(r.jobs[jk], r.pipelineRuns[pk])
 			}
 
 			tk := toKey(tc.context, tc.namespace, name)
@@ -748,8 +778,287 @@ func TestReconcile(t *testing.T) {
 				t.Error("failed to receive expected error")
 			case !equality.Semantic.DeepEqual(r.jobs, expectedJobs):
 				t.Errorf("prowjobs do not match:\n%s", diff.ObjectReflectDiff(expectedJobs, r.jobs))
-			case !equality.Semantic.DeepEqual(r.pipelines, expectedPipelineRuns):
-				t.Errorf("pipelineruns do not match:\n%s", diff.ObjectReflectDiff(expectedPipelineRuns, r.pipelines))
+			case !equality.Semantic.DeepEqual(r.pipelineRuns, expectedPipelineRuns):
+				t.Errorf("pipelineruns do not match:\n%s", diff.ObjectReflectDiff(expectedPipelineRuns, r.pipelineRuns))
+			}
+		})
+	}
+
+}
+
+func TestFlattenPipelineRun(t *testing.T) {
+	testPipelineName := "test-pipeline"
+	taskName1 := "task1"
+	taskName2 := "task2"
+	task1 := pipelinev1alpha1.Task{
+		Spec: pipelinev1alpha1.TaskSpec{},
+	}
+	step1 := pipelinev1alpha1.Step{}
+	step1.Name = "step1"
+	task1.Spec.Steps = []pipelinev1alpha1.Step{step1}
+	task2 := pipelinev1alpha1.Task{
+		Spec: pipelinev1alpha1.TaskSpec{},
+	}
+	step2 := pipelinev1alpha1.Step{}
+	step2.Name = "step2"
+	task2.Spec.Steps = []pipelinev1alpha1.Step{step2}
+	cases := []struct {
+		name                    string
+		namespace               string
+		context                 string
+		observedPipelineName    string
+		observedPipeline        *pipelinev1alpha1.Pipeline
+		observedTasks           map[string]pipelinev1alpha1.Task
+		originalPipelineRunSpec pipelinev1alpha1.PipelineRunSpec
+		expectedPipelineRunSpec pipelinev1alpha1.PipelineRunSpec
+		err                     bool
+	}{
+		{
+			name: "Already flattened PipelineRun does nothing",
+			originalPipelineRunSpec: pipelinev1alpha1.PipelineRunSpec{
+				PipelineSpec: &pipelinev1alpha1.PipelineSpec{
+					Tasks: []pipelinev1alpha1.PipelineTask{
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task1.Spec,
+						},
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task2.Spec,
+						},
+					},
+				},
+			},
+			expectedPipelineRunSpec: pipelinev1alpha1.PipelineRunSpec{
+				PipelineSpec: &pipelinev1alpha1.PipelineSpec{
+					Tasks: []pipelinev1alpha1.PipelineTask{
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task1.Spec,
+						},
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task2.Spec,
+						},
+					},
+				},
+			},
+		},
+		{
+			name:                 "PipelineRef resolves into PipelineSpec",
+			observedPipelineName: testPipelineName,
+			observedPipeline: &pipelinev1alpha1.Pipeline{
+				Spec: pipelinev1alpha1.PipelineSpec{
+					Tasks: []pipelinev1alpha1.PipelineTask{
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task1.Spec,
+						},
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task2.Spec,
+						},
+					},
+				},
+			},
+			originalPipelineRunSpec: pipelinev1alpha1.PipelineRunSpec{
+				PipelineRef: &pipelinev1alpha1.PipelineRef{
+					Name: testPipelineName,
+				},
+			},
+			expectedPipelineRunSpec: pipelinev1alpha1.PipelineRunSpec{
+				PipelineSpec: &pipelinev1alpha1.PipelineSpec{
+					Tasks: []pipelinev1alpha1.PipelineTask{
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task1.Spec,
+						},
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task2.Spec,
+						},
+					},
+				},
+			},
+		},
+		{
+			name:                 "Error when unable to resolve Pipeline",
+			namespace:            errorGetPipeline,
+			observedPipelineName: testPipelineName,
+			observedPipeline: &pipelinev1alpha1.Pipeline{
+				Spec: pipelinev1alpha1.PipelineSpec{
+					Tasks: []pipelinev1alpha1.PipelineTask{
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task1.Spec,
+						},
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task2.Spec,
+						},
+					},
+				},
+			},
+			originalPipelineRunSpec: pipelinev1alpha1.PipelineRunSpec{
+				PipelineRef: &pipelinev1alpha1.PipelineRef{
+					Name: testPipelineName,
+				},
+			},
+			expectedPipelineRunSpec: pipelinev1alpha1.PipelineRunSpec{
+				PipelineSpec: &pipelinev1alpha1.PipelineSpec{
+					Tasks: []pipelinev1alpha1.PipelineTask{
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task1.Spec,
+						},
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task2.Spec,
+						},
+					},
+				},
+			},
+			err: true,
+		},
+		{
+			name:      "Error when unable to resolve Task",
+			namespace: errorGetTask,
+			observedTasks: map[string]pipelinev1alpha1.Task{
+				taskName1: task1,
+				taskName2: task2,
+			},
+			originalPipelineRunSpec: pipelinev1alpha1.PipelineRunSpec{
+				PipelineSpec: &pipelinev1alpha1.PipelineSpec{
+					Tasks: []pipelinev1alpha1.PipelineTask{
+						pipelinev1alpha1.PipelineTask{
+							TaskRef: &pipelinev1alpha1.TaskRef{
+								Name: taskName1,
+							},
+						},
+						pipelinev1alpha1.PipelineTask{
+							TaskRef: &pipelinev1alpha1.TaskRef{
+								Name: taskName2,
+							},
+						},
+					},
+				},
+			},
+			expectedPipelineRunSpec: pipelinev1alpha1.PipelineRunSpec{
+				PipelineSpec: &pipelinev1alpha1.PipelineSpec{
+					Tasks: []pipelinev1alpha1.PipelineTask{
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task1.Spec,
+						},
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task2.Spec,
+						},
+					},
+				},
+			},
+			err: true,
+		},
+		{
+			name: "TaskRefs resolve into TaskSpecs",
+			observedTasks: map[string]pipelinev1alpha1.Task{
+				taskName1: task1,
+				taskName2: task2,
+			},
+			originalPipelineRunSpec: pipelinev1alpha1.PipelineRunSpec{
+				PipelineSpec: &pipelinev1alpha1.PipelineSpec{
+					Tasks: []pipelinev1alpha1.PipelineTask{
+						pipelinev1alpha1.PipelineTask{
+							TaskRef: &pipelinev1alpha1.TaskRef{
+								Name: taskName1,
+							},
+						},
+						pipelinev1alpha1.PipelineTask{
+							TaskRef: &pipelinev1alpha1.TaskRef{
+								Name: taskName2,
+							},
+						},
+					},
+				},
+			},
+			expectedPipelineRunSpec: pipelinev1alpha1.PipelineRunSpec{
+				PipelineSpec: &pipelinev1alpha1.PipelineSpec{
+					Tasks: []pipelinev1alpha1.PipelineTask{
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task1.Spec,
+						},
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task2.Spec,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "All refs are resolved into specs",
+			observedTasks: map[string]pipelinev1alpha1.Task{
+				taskName1: task1,
+				taskName2: task2,
+			},
+			observedPipelineName: testPipelineName,
+			observedPipeline: &pipelinev1alpha1.Pipeline{
+				Spec: pipelinev1alpha1.PipelineSpec{
+					Tasks: []pipelinev1alpha1.PipelineTask{
+						pipelinev1alpha1.PipelineTask{
+							TaskRef: &pipelinev1alpha1.TaskRef{
+								Name: taskName1,
+							},
+						},
+						pipelinev1alpha1.PipelineTask{
+							TaskRef: &pipelinev1alpha1.TaskRef{
+								Name: taskName2,
+							},
+						},
+					},
+				},
+			},
+			originalPipelineRunSpec: pipelinev1alpha1.PipelineRunSpec{
+				PipelineRef: &pipelinev1alpha1.PipelineRef{
+					Name: testPipelineName,
+				},
+			},
+
+			expectedPipelineRunSpec: pipelinev1alpha1.PipelineRunSpec{
+				PipelineSpec: &pipelinev1alpha1.PipelineSpec{
+					Tasks: []pipelinev1alpha1.PipelineTask{
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task1.Spec,
+						},
+						pipelinev1alpha1.PipelineTask{
+							TaskSpec: &task2.Spec,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+
+			r := &fakeReconciler{
+				jobs:         map[string]prowjobv1.ProwJob{},
+				pipelineRuns: map[string]pipelinev1alpha1.PipelineRun{},
+				pipelines:    map[string]pipelinev1alpha1.Pipeline{},
+				tasks:        map[string]pipelinev1alpha1.Task{},
+			}
+
+			if tc.context == "" {
+				tc.context = kube.DefaultClusterAlias
+			}
+
+			pk := toKey(tc.context, tc.namespace, tc.observedPipelineName)
+			if p := tc.observedPipeline; p != nil {
+				r.pipelines[pk] = *p
+			}
+
+			for name, task := range tc.observedTasks {
+				tk := toKey(tc.context, tc.namespace, name)
+				r.tasks[tk] = task
+			}
+
+			pipelineRun := pipelinev1alpha1.PipelineRun{Spec: tc.originalPipelineRunSpec}
+			err := flattenPipelineRun(r, tc.context, tc.namespace, &pipelineRun)
+			switch {
+			case err != nil:
+				if !tc.err {
+					t.Errorf("unexpected error: %v", err)
+				}
+			case tc.err:
+				t.Error("failed to receive expected error")
+			case !equality.Semantic.DeepEqual(pipelineRun.Spec, tc.expectedPipelineRunSpec):
+				t.Errorf("pipelineruns do not match:\n%s", diff.ObjectReflectDiff(tc.originalPipelineRunSpec, tc.expectedPipelineRunSpec))
 			}
 		})
 	}

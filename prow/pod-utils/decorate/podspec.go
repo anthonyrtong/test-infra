@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	pipelinev1alpha1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1"
 	coreapi "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -160,6 +161,10 @@ func LabelsAndAnnotationsForJob(pj prowapi.ProwJob) (map[string]string, map[stri
 // ProwJobToPod converts a ProwJob to a Pod that will run the tests.
 func ProwJobToPod(pj prowapi.ProwJob, buildID string) (*coreapi.Pod, error) {
 	return ProwJobToPodLocal(pj, buildID, "")
+}
+
+func ProwJobToPipelineRun(pj prowapi.ProwJob, buildID string) (*pipelinev1alpha1.PipelineRun, error) {
+	return nil, nil
 }
 
 // ProwJobToPodLocal converts a ProwJob to a Pod that will run the tests.

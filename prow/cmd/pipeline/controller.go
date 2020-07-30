@@ -273,6 +273,8 @@ type reconciler interface {
 	getPipelineRun(context, namespace, name string) (*pipelinev1alpha1.PipelineRun, error)
 	deletePipelineRun(context, namespace, name string) error
 	createPipelineRun(context, namespace string, b *pipelinev1alpha1.PipelineRun) (*pipelinev1alpha1.PipelineRun, error)
+	getPipeline(context, namespace, name string) (*pipelinev1alpha1.Pipeline, error)
+	getTask(context, namespace, name string) (*pipelinev1alpha1.Task, error)
 	pipelineID(prowjobv1.ProwJob) (string, string, error)
 	now() metav1.Time
 }
@@ -314,6 +316,22 @@ func (c *controller) deletePipelineRun(pContext, namespace, name string) error {
 		return err
 	}
 	return p.client.TektonV1alpha1().PipelineRuns(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
+}
+
+func (c *controller) getPipeline(context, namespace, name string) (*pipelinev1alpha1.Pipeline, error) {
+	p, err := c.getPipelineConfig(context)
+	if err != nil {
+		return nil, err
+	}
+	return p.client.TektonV1alpha1().Pipelines(namespace).Get(name, metav1.GetOptions{})
+}
+
+func (c *controller) getTask(context, namespace, name string) (*pipelinev1alpha1.Task, error) {
+	p, err := c.getPipelineConfig(context)
+	if err != nil {
+		return nil, err
+	}
+	return p.client.TektonV1alpha1().Tasks(namespace).Get(name, metav1.GetOptions{})
 }
 
 func (c *controller) createPipelineRun(pContext, namespace string, p *pipelinev1alpha1.PipelineRun) (*pipelinev1alpha1.PipelineRun, error) {
@@ -428,6 +446,12 @@ func reconcile(c reconciler, key string) error {
 		pipelineRun, err := makePipelineRun(*newpj)
 		if err != nil {
 			return fmt.Errorf("error preparing resources: %v", err)
+		}
+		if newpj.Spec.DecorationConfig != nil {
+			err = flattenPipelineRun(c, ctx, namespace, pipelineRun)
+			if err != nil {
+				return fmt.Errorf("error flattening PipelineRun: %v", err)
+			}
 		}
 
 		logrus.Infof("Create PipelineRun/%s", key)
@@ -586,6 +610,32 @@ func makePipelineGitResource(name string, refs prowjobv1.Refs, pj prowjobv1.Prow
 		},
 	}
 	return &pr
+}
+
+func flattenPipelineRun(c reconciler, context, namespace string, p *pipelinev1alpha1.PipelineRun) error {
+	// Change PipelineRef into embedded PipelineSpec if necessary
+	if p.Spec.PipelineRef != nil {
+		pipelineName := p.Spec.PipelineRef.Name
+		pipeline, err := c.getPipeline(context, namespace, pipelineName)
+		if err != nil {
+			return fmt.Errorf("Could not resolve Pipeline from PipelineRef: %v", err)
+		}
+		p.Spec.PipelineSpec = pipeline.Spec.DeepCopy()
+		p.Spec.PipelineRef = nil
+	}
+	for i, task := range p.Spec.PipelineSpec.Tasks {
+		// Change TaskRef into embedded TaskSpec if necessary
+		if task.TaskRef != nil {
+			taskName := task.TaskRef.Name
+			refTask, err := c.getTask(context, namespace, taskName)
+			if err != nil {
+				return fmt.Errorf("Could not resolve Task from TaskRef")
+			}
+			p.Spec.PipelineSpec.Tasks[i].TaskRef = nil
+			p.Spec.PipelineSpec.Tasks[i].TaskSpec = refTask.Spec.DeepCopy()
+		}
+	}
+	return nil
 }
 
 // makePipeline creates a PipelineRun and substitutes ProwJob managed pipeline resources with ResourceSpec instead of ResourceRef
